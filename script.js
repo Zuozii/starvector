@@ -97,88 +97,68 @@ function showError(msg) {
   svgContainer.innerHTML = '<p style="color:#ef4444;padding:20px;text-align:center">' + msg + '</p>';
 }
 
-async function convertToSvg() {
+function convertToSvg() {
   if (!currentFile) return;
-
   svgContainer.innerHTML = '<div class="loading-overlay"><div class="spinner"></div> Converting...</div>';
 
-  try {
-    const numColors = parseInt(colorsSlider.value);
-    const simplify = parseInt(simplifySlider.value);
-    const svg = await traceImage(originalDataUrl, numColors, simplify);
-    currentSvg = svg;
-    svgContainer.innerHTML = svg;
+  var img = new Image();
+  img.onload = function() {
+    try {
+      var numColors = parseInt(colorsSlider.value);
+      var simplify = parseInt(simplifySlider.value);
+      var svg = buildSvg(img, numColors, simplify);
+      currentSvg = svg;
+      svgContainer.innerHTML = svg;
 
-    const svgEl = svgContainer.querySelector('svg');
-    if (svgEl) {
-      svgEl.setAttribute('width', '100%');
-      svgEl.setAttribute('height', '100%');
-      svgEl.style.width = '100%';
-      svgEl.style.height = '100%';
-    }
-  } catch (err) {
-    console.error(err);
-    showError('Conversion failed: ' + err.message);
-  }
-}
-
-function traceImage(dataUrl, numColors, simplify) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const result = doTrace(img, numColors, simplify);
-        resolve(result);
-      } catch (e) {
-        reject(e);
+      var svgEl = svgContainer.querySelector('svg');
+      if (svgEl) {
+        svgEl.setAttribute('width', '100%');
+        svgEl.setAttribute('height', '100%');
+        svgEl.style.width = '100%';
+        svgEl.style.height = '100%';
       }
-    };
-    img.onerror = () => reject(new Error('Failed to load image'));
-    img.src = dataUrl;
-  });
+    } catch (err) {
+      console.error(err);
+      showError('Conversion failed: ' + err.message);
+    }
+  };
+  img.onerror = function() {
+    showError('Failed to load image for conversion.');
+  };
+  img.src = originalDataUrl;
 }
 
-function doTrace(img, numColors, simplify) {
-  const maxDim = 512;
-  let w = img.width;
-  let h = img.height;
+function buildSvg(img, numColors, simplify) {
+  var maxDim = 512;
+  var w = img.width;
+  var h = img.height;
+  var scale = 1;
   if (w > maxDim || h > maxDim) {
-    const ratio = Math.min(maxDim / w, maxDim / h);
-    w = Math.round(w * ratio);
-    h = Math.round(h * ratio);
+    scale = Math.min(maxDim / w, maxDim / h);
+    w = Math.round(w * scale);
+    h = Math.round(h * scale);
   }
 
-  const canvas = document.createElement('canvas');
+  var canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
-  const ctx = canvas.getContext('2d');
+  var ctx = canvas.getContext('2d');
   ctx.drawImage(img, 0, 0, w, h);
-  const imageData = ctx.getImageData(0, 0, w, h);
-  const pixels = imageData.data;
+  var imageData = ctx.getImageData(0, 0, w, h);
 
-  const quantized = quantizeColors(pixels, w, h, numColors);
+  var result = quantizeAndTrace(imageData.data, w, h, numColors, simplify);
+  var svgW = scale < 1 ? img.width : w;
+  var svgH = scale < 1 ? img.height : h;
 
-  const paths = [];
-  for (let ci = 0; ci < quantized.colors.length; ci++) {
-    const color = quantized.colors[ci];
-    const binary = makeBinaryLayer(quantized.indices, w, h, ci);
-    const svgPath = traceLayer(binary, w, h, simplify);
-    if (svgPath) {
-      const hex = rgbToHex(color[0], color[1], color[2]);
-      paths.push('<path d="' + svgPath + '" fill="' + hex + '" fill-rule="evenodd"/>');
-    }
-  }
-
-  const scale = Math.max(img.width, img.height) <= maxDim ? 1 : Math.max(img.width, img.height) / maxDim;
-  const svgW = scale > 1 ? Math.round(w * scale) : w;
-  const svgH = scale > 1 ? Math.round(h * scale) : h;
-
-  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '" width="' + svgW + '" height="' + svgH + '">' +
-    paths.join('') + '</svg>';
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + w + ' ' + h + '"' +
+    ' width="' + svgW + '" height="' + svgH + '">' +
+    result + '</svg>';
 }
 
-function quantizeColors(pixels, w, h, numColors) {
-  const colorMap = new Map();
+function quantizeAndTrace(pixels, w, h, numColors, simplify) {
+  const colorKeys = [];
+  const keyToIndex = {};
+  const indexToColor = [];
   const indices = new Uint8Array(w * h);
 
   const step = Math.max(1, Math.round(256 / Math.cbrt(numColors)));
@@ -191,10 +171,7 @@ function quantizeColors(pixels, w, h, numColors) {
     const a = pixels[i * 4 + 3];
 
     if (a < 128) {
-      const key = 'transparent';
-      if (!colorMap.has(key)) colorMap.set(key, [0, 0, 0, 0]);
-      const idx = getIndex(colorMap, key);
-      indices[i] = idx;
+      indices[i] = 255;
       continue;
     }
 
@@ -203,106 +180,74 @@ function quantizeColors(pixels, w, h, numColors) {
     const qb = Math.min(levels - 1, Math.floor(b / step));
     const key = qr + ',' + qg + ',' + qb;
 
-    if (!colorMap.has(key)) {
-      const cr = Math.round(qr * step + step / 2);
-      const cg = Math.round(qg * step + step / 2);
-      const cb = Math.round(qb * step + step / 2);
-      colorMap.set(key, [cr, cg, cb, 0]);
+    if (keyToIndex[key] === undefined) {
+      keyToIndex[key] = indexToColor.length;
+      indexToColor.push([
+        Math.round(qr * step + step / 2),
+        Math.round(qg * step + step / 2),
+        Math.round(qb * step + step / 2)
+      ]);
     }
-    indices[i] = getIndex(colorMap, key);
+    indices[i] = keyToIndex[key];
   }
 
-  if (colorMap.size > numColors) {
-    return mergeColorsByFrequency(indices, colorMap, w, h, numColors);
+  let colors = indexToColor;
+  if (colors.length > numColors) {
+    const merged = mergeSmallColors(indices, colors, w, h, numColors);
+    colors = merged.colors;
+    for (let i = 0; i < indices.length; i++) {
+      indices[i] = merged.remap[indices[i]];
+    }
   }
 
-  return {
-    colors: Array.from(colorMap.values()),
-    indices: indices
-  };
+  let svgContent = '';
+  for (let ci = 0; ci < colors.length; ci++) {
+    if (ci === 255) continue;
+    const binary = makeBinary(indices, w, h, ci);
+    const pathData = traceAndSimplify(binary, w, h, simplify);
+    if (pathData) {
+      const hex = rgbToHex(colors[ci][0], colors[ci][1], colors[ci][2]);
+      svgContent += '<path d="' + pathData + '" fill="' + hex + '" fill-rule="evenodd"/>';
+    }
+  }
+  return svgContent;
 }
 
-let colorIndexCounter = 0;
-function getIndex(map, key) {
-  if (!map.has('_idx_' + key)) {
-    map.set('_idx_' + key, colorIndexCounter++);
-  }
-  return map.get('_idx_' + key);
-}
-
-function mergeColorsByFrequency(indices, colorMap, w, h, targetCount) {
-  const freq = new Map();
-  const colorKeys = [];
-  for (const [key, color] of colorMap) {
-    if (key.startsWith('_idx_')) continue;
-    freq.set(key, 0);
-    colorKeys.push(key);
-  }
+function mergeSmallColors(indices, colors, w, h, targetCount) {
+  const freq = new Array(colors.length).fill(0);
   for (let i = 0; i < indices.length; i++) {
-    for (const key of colorKeys) {
-      if (indices[i] === colorMap.get('_idx_' + key)) {
-        freq.set(key, freq.get(key) + 1);
-        break;
+    if (indices[i] < 255) freq[indices[i]]++;
+  }
+
+  const sorted = colors.map((c, i) => i).sort((a, b) => freq[b] - freq[a]);
+  const keep = new Set(sorted.slice(0, targetCount));
+
+  const newColors = [];
+  const remap = new Array(colors.length).fill(0);
+  for (let i = 0; i < colors.length; i++) {
+    if (keep.has(i)) {
+      remap[i] = newColors.length;
+      newColors.push(colors[i]);
+    }
+  }
+
+  for (let i = 0; i < colors.length; i++) {
+    if (!keep.has(i)) {
+      let nearest = sorted[0];
+      let minDist = Infinity;
+      for (let j = 0; j < sorted.length; j++) {
+        if (!keep.has(sorted[j])) continue;
+        const d = colorDist(colors[i], colors[sorted[j]]);
+        if (d < minDist) {
+          minDist = d;
+          nearest = sorted[j];
+        }
       }
+      remap[i] = remap[nearest];
     }
   }
 
-  colorKeys.sort((a, b) => freq.get(b) - freq.get(a));
-  const keepKeys = new Set(colorKeys.slice(0, targetCount));
-
-  const newColorMap = new Map();
-  for (const key of keepKeys) {
-    newColorMap.set(key, colorMap.get(key));
-  }
-
-  const newIndices = new Uint8Array(indices.length);
-  const keyToNewIdx = {};
-  for (const key of keepKeys) {
-    const oldIdx = colorMap.get('_idx_' + key);
-    keyToNewIdx[oldIdx] = getIndex(newColorMap, key);
-  }
-
-  const closest = findClosestColorMap(keepKeys, colorMap);
-  for (let i = 0; i < indices.length; i++) {
-    const oldIdx = indices[i];
-    if (keyToNewIdx[oldIdx] !== undefined) {
-      newIndices[i] = keyToNewIdx[oldIdx];
-    } else {
-      const nearestKey = closest[oldIdx];
-      newIndices[i] = getIndex(newColorMap, nearestKey);
-    }
-  }
-
-  return {
-    colors: Array.from(newColorMap.values()),
-    indices: newIndices
-  };
-}
-
-function findClosestColorMap(keepKeys, colorMap) {
-  const keepColors = [];
-  const keepOldIdx = [];
-  for (const key of keepKeys) {
-    keepColors.push(colorMap.get(key));
-    keepOldIdx.push(colorMap.get('_idx_' + key));
-  }
-
-  const mapping = {};
-  for (const [key, color] of colorMap) {
-    if (key.startsWith('_idx_')) continue;
-    const oldIdx = colorMap.get('_idx_' + key);
-    let minDist = Infinity;
-    let bestKey = keepKeys.values().next().value;
-    for (let j = 0; j < keepColors.length; j++) {
-      const d = colorDist(color, keepColors[j]);
-      if (d < minDist) {
-        minDist = d;
-        bestKey = Array.from(keepKeys)[j];
-      }
-    }
-    mapping[oldIdx] = bestKey;
-  }
-  return mapping;
+  return { colors: newColors, remap: remap };
 }
 
 function colorDist(a, b) {
@@ -312,25 +257,27 @@ function colorDist(a, b) {
   return dr * dr + dg * dg + db * db;
 }
 
-function makeBinaryLayer(indices, w, h, colorIdx) {
-  const binary = new Uint8Array(w * h);
+function makeBinary(indices, w, h, ci) {
+  const bin = new Uint8Array(w * h);
   for (let i = 0; i < w * h; i++) {
-    binary[i] = indices[i] === colorIdx ? 1 : 0;
+    bin[i] = indices[i] === ci ? 1 : 0;
   }
-  return binary;
+  return bin;
 }
 
-function traceLayer(binary, w, h, simplify) {
+function traceAndSimplify(binary, w, h, simplify) {
   const visited = new Uint8Array(w * h);
   let allPaths = '';
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       if (binary[y * w + x] === 1 && visited[y * w + x] === 0) {
-        const boundary = traceBoundary(binary, w, h, x, y, visited);
-        if (boundary.length > 2) {
-          const simplified = douglasPeucker(boundary, simplify / 10 + 0.5);
-          allPaths += pointsToSvgPath(simplified) + ' ';
+        const boundary = traceRegion(binary, w, h, x, y, visited);
+        if (boundary.length >= 3) {
+          const simplified = douglasPeucker(boundary, simplify / 5 + 1);
+          if (simplified.length >= 3) {
+            allPaths += pointsToPath(simplified) + ' ';
+          }
         }
       }
     }
@@ -338,27 +285,30 @@ function traceLayer(binary, w, h, simplify) {
   return allPaths.trim();
 }
 
-const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1], [1, 1], [-1, 1], [-1, -1], [1, -1]];
-
-function traceBoundary(binary, w, h, startX, startY, visited) {
-  const points = [];
-  const queue = [[startX, startY]];
-  visited[startY * w + startX] = 1;
+function traceRegion(binary, w, h, sx, sy, visited) {
+  const boundary = [];
+  const queue = [[sx, sy]];
+  visited[sy * w + sx] = 1;
 
   while (queue.length > 0) {
     const [x, y] = queue.shift();
 
-    const isBoundary = DIRS.some(([dx, dy]) => {
-      const nx = x + dx;
-      const ny = y + dy;
-      return nx < 0 || nx >= w || ny < 0 || ny >= h || binary[ny * w + nx] === 0;
-    });
-
-    if (isBoundary) {
-      points.push([x, y]);
+    let isEdge = false;
+    for (let dy = -1; dy <= 1 && !isEdge; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || nx >= w || ny < 0 || ny >= h || binary[ny * w + nx] === 0) {
+          isEdge = true;
+          break;
+        }
+      }
     }
+    if (isEdge) boundary.push([x, y]);
 
-    for (const [dx, dy] of DIRS.slice(0, 4)) {
+    const dirs = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+    for (const [dx, dy] of dirs) {
       const nx = x + dx;
       const ny = y + dy;
       if (nx >= 0 && nx < w && ny >= 0 && ny < h && binary[ny * w + nx] === 1 && visited[ny * w + nx] === 0) {
@@ -368,27 +318,20 @@ function traceBoundary(binary, w, h, startX, startY, visited) {
     }
   }
 
-  return sortBoundaryPoints(points);
-}
-
-function sortBoundaryPoints(points) {
-  if (points.length < 3) return points;
+  if (boundary.length < 3) return boundary;
 
   let cx = 0, cy = 0;
-  for (const [x, y] of points) {
-    cx += x;
-    cy += y;
-  }
-  cx /= points.length;
-  cy /= points.length;
+  for (const [x, y] of boundary) { cx += x; cy += y; }
+  cx /= boundary.length;
+  cy /= boundary.length;
 
-  points.sort((a, b) => {
-    const angleA = Math.atan2(a[1] - cy, a[0] - cx);
-    const angleB = Math.atan2(b[1] - cy, b[0] - cx);
-    return angleA - angleB;
+  boundary.sort((a, b) => {
+    const aa = Math.atan2(a[1] - cy, a[0] - cx);
+    const ab = Math.atan2(b[1] - cy, b[0] - cx);
+    return aa - ab;
   });
 
-  return points;
+  return boundary;
 }
 
 function douglasPeucker(points, epsilon) {
@@ -400,7 +343,7 @@ function douglasPeucker(points, epsilon) {
   const last = points[points.length - 1];
 
   for (let i = 1; i < points.length - 1; i++) {
-    const d = perpendicularDist(points[i], first, last);
+    const d = perpDist(points[i], first, last);
     if (d > maxDist) {
       maxDist = d;
       maxIdx = i;
@@ -411,23 +354,18 @@ function douglasPeucker(points, epsilon) {
 
   const left = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
   const right = douglasPeucker(points.slice(maxIdx), epsilon);
-
   return left.slice(0, -1).concat(right);
 }
 
-function perpendicularDist(point, lineStart, lineEnd) {
-  const [x, y] = point;
-  const [x1, y1] = lineStart;
-  const [x2, y2] = lineEnd;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
+function perpDist(p, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
   const len = Math.sqrt(dx * dx + dy * dy);
-  if (len === 0) return Math.sqrt((x - x1) ** 2 + (y - y1) ** 2);
-  return Math.abs(dy * x - dx * y + x2 * y1 - y2 * x1) / len;
+  if (len === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
+  return Math.abs(dy * p[0] - dx * p[1] + b[0] * a[1] - b[1] * a[0]) / len;
 }
 
-function pointsToSvgPath(points) {
-  if (points.length === 0) return '';
+function pointsToPath(points) {
   let d = 'M ' + points[0][0] + ' ' + points[0][1];
   for (let i = 1; i < points.length; i++) {
     d += ' L ' + points[i][0] + ' ' + points[i][1];
@@ -437,5 +375,5 @@ function pointsToSvgPath(points) {
 }
 
 function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
+  return '#' + [r, g, b].map(function(c) { return c.toString(16).padStart(2, '0'); }).join('');
 }
