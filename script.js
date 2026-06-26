@@ -131,15 +131,14 @@ function doConvert() {
         rightangleenhance: true
       };
 
-      ImageTracer.imageToSVG(imageData, function(svgstr) {
-        currentSvg = svgstr;
-        svgContainer.innerHTML = svgstr;
-        var svgEl = svgContainer.querySelector('svg');
-        if (svgEl) {
-          svgEl.style.width = '100%';
-          svgEl.style.height = '100%';
-        }
-      }, options);
+      var svgstr = ImageTracer.imagedataToSVG(imageData, options);
+      currentSvg = svgstr;
+      svgContainer.innerHTML = svgstr;
+      var svgEl = svgContainer.querySelector('svg');
+      if (svgEl) {
+        svgEl.style.width = '100%';
+        svgEl.style.height = '100%';
+      }
 
     } catch (err) {
       console.error(err);
